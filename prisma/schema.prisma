@@ -1,0 +1,752 @@
+// سنتر أنمكا – ANMKA Center
+// Database Schema — PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Center / Multi-tenant root (single center today, schema supports more)
+// ──────────────────────────────────────────────────────────────────────────
+
+model Center {
+  id                 String   @id @default(cuid())
+  name               String   @default("سنتر أنمكا")
+  nameEn             String   @default("ANMKA Center")
+  logoUrl            String?
+  phone              String?
+  address            String?
+  workingHours       String?
+  currency           String   @default("EGP")
+  defaultBillingModel BillingModel @default(MONTHLY)
+  gracePeriodMinutes Int      @default(10)
+  lateAfterMinutes   Int      @default(10)
+  autoAbsenceEnabled Boolean  @default(true)
+  attendanceNotificationsEnabled Boolean @default(true)
+  whatsappEnabled    Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  users          User[]
+  subjects       Subject[]
+  courses        Course[]
+  stages         Stage[]
+  classrooms     Classroom[]
+  groups         Group[]
+  expenses       Expense[]
+  settings       Setting[]
+  messageTemplates MessageTemplate[]
+  auditLogs      AuditLog[]
+  roles          Role[]
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Auth / Users / RBAC + granular permissions
+// ──────────────────────────────────────────────────────────────────────────
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+model User {
+  id           String     @id @default(cuid())
+  centerId     String
+  center       Center     @relation(fields: [centerId], references: [id])
+  phone        String     @unique
+  passwordHash String?
+  fullName     String
+  avatarUrl    String?
+  status       UserStatus @default(ACTIVE)
+  roleId       String
+  role         Role       @relation(fields: [roleId], references: [id])
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  permissionOverrides UserPermission[]
+  sessions            AuthSession[]
+  otpCodes            OtpCode[]
+
+  student  Student?
+  teacher  Teacher?
+  parent   Parent?
+
+  notifications       Notification[]
+  auditLogs            AuditLog[] @relation("AuditActor")
+  attendanceMarked     Attendance[] @relation("AttendanceRecordedBy")
+  paymentsReceived     Payment[]   @relation("PaymentReceivedBy")
+  examsCreated         Exam[]      @relation("ExamCreatedBy")
+  examResultsGraded    ExamResult[] @relation("ExamResultGradedBy")
+
+  @@index([centerId])
+}
+
+model Role {
+  id         String   @id @default(cuid())
+  centerId   String
+  center     Center   @relation(fields: [centerId], references: [id])
+  key        String   // admin, assistant, teacher, student, parent, or custom
+  name       String   // Arabic display name
+  isSystem   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  users       User[]
+  permissions RolePermission[]
+
+  @@unique([centerId, key])
+}
+
+model Permission {
+  id    String @id @default(cuid())
+  key   String @unique // e.g. students.view
+  group String // e.g. students
+
+  roles RolePermission[]
+  users UserPermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+// per-user overrides (used mainly for Assistants with custom permission sets)
+model UserPermission {
+  userId       String
+  permissionId String
+  granted      Boolean // true = grant, false = explicit deny
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+}
+
+// Only used for password reset now — login/register are phone + password (see auth.service.ts).
+enum OtpPurpose {
+  RESET
+}
+
+model OtpCode {
+  id         String     @id @default(cuid())
+  phone      String
+  userId     String?
+  user       User?      @relation(fields: [userId], references: [id])
+  codeHash   String
+  purpose    OtpPurpose
+  attempts   Int        @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime   @default(now())
+
+  @@index([phone, purpose])
+}
+
+model AuthSession {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  userAgent String?
+  ip        String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// People
+// ──────────────────────────────────────────────────────────────────────────
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+model Stage {
+  id       String @id @default(cuid())
+  centerId String
+  center   Center @relation(fields: [centerId], references: [id])
+  name     String // e.g. المرحلة الابتدائية
+  order    Int    @default(0)
+
+  grades Grade[]
+
+  @@unique([centerId, name])
+}
+
+model Grade {
+  id      String @id @default(cuid())
+  stageId String
+  stage   Stage  @relation(fields: [stageId], references: [id])
+  name    String // e.g. الصف الثالث
+  order   Int    @default(0)
+
+  students Student[]
+  groups   Group[]
+
+  @@unique([stageId, name])
+}
+
+model Student {
+  id               String    @id @default(cuid())
+  userId           String    @unique
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  studentCode      String    @unique // human readable ID e.g. AN-0001
+  qrCode           String    @unique // encoded unique identifier for QR
+  photoUrl         String?
+  dateOfBirth      DateTime?
+  gender           Gender?
+  school           String?
+  gradeId          String?
+  grade            Grade?    @relation(fields: [gradeId], references: [id])
+  address          String?
+  guardianName     String?
+  guardianPhone    String?
+  enrollmentDate   DateTime  @default(now())
+  status           UserStatus @default(ACTIVE)
+
+  parents          ParentStudent[]
+  groupMemberships GroupStudent[]
+  expectedAttendances ExpectedAttendance[]
+  attendances      Attendance[]
+  nfcCards         NfcCard[]
+  examAttempts     ExamAttempt[]
+  examResults      ExamResult[]
+  subscriptions    Subscription[]
+  charges          StudentCharge[]
+  payments         Payment[]
+
+  @@index([gradeId])
+}
+
+model Parent {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  children ParentStudent[]
+}
+
+model ParentStudent {
+  parentId  String
+  studentId String
+  parent    Parent  @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@id([parentId, studentId])
+}
+
+model Teacher {
+  id       String  @id @default(cuid())
+  userId   String  @unique
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  photoUrl String?
+  bio      String?
+  status   UserStatus @default(ACTIVE)
+
+  subjects Subject[] @relation("TeacherSubjects")
+  groups   Group[]
+  exams    Exam[]
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Academics: Subjects / Courses / Groups / Classrooms
+// ──────────────────────────────────────────────────────────────────────────
+
+model Course {
+  id       String   @id @default(cuid())
+  centerId String
+  center   Center   @relation(fields: [centerId], references: [id])
+  name     String
+
+  subjects Subject[]
+}
+
+model Subject {
+  id       String  @id @default(cuid())
+  centerId String
+  center   Center  @relation(fields: [centerId], references: [id])
+  courseId String?
+  course   Course? @relation(fields: [courseId], references: [id])
+  name     String
+
+  teachers Teacher[] @relation("TeacherSubjects")
+  groups   Group[]
+  exams    Exam[]
+
+  @@unique([centerId, name])
+}
+
+model Classroom {
+  id       String @id @default(cuid())
+  centerId String
+  center   Center @relation(fields: [centerId], references: [id])
+  name     String
+
+  scheduleSlots ScheduleSlot[]
+
+  @@unique([centerId, name])
+}
+
+enum BillingModel {
+  MONTHLY
+  PER_SESSION
+  CUSTOM
+}
+
+enum GroupStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model Group {
+  id            String       @id @default(cuid())
+  centerId      String
+  center        Center       @relation(fields: [centerId], references: [id])
+  name          String
+  subjectId     String
+  subject       Subject      @relation(fields: [subjectId], references: [id])
+  teacherId     String
+  teacher       Teacher      @relation(fields: [teacherId], references: [id])
+  gradeId       String?
+  grade         Grade?       @relation(fields: [gradeId], references: [id])
+  maxStudents   Int?
+  price         Decimal      @default(0) @db.Decimal(10, 2)
+  billingModel  BillingModel @default(MONTHLY)
+  status        GroupStatus  @default(ACTIVE)
+  createdAt     DateTime     @default(now())
+
+  students      GroupStudent[]
+  scheduleSlots ScheduleSlot[]
+  sessions      Session[]
+  exams         Exam[]
+  subscriptions Subscription[]
+  charges       StudentCharge[]
+
+  @@index([centerId])
+}
+
+model GroupStudent {
+  groupId   String
+  studentId String
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  joinedAt  DateTime @default(now())
+  leftAt    DateTime?
+  status    UserStatus @default(ACTIVE)
+
+  @@id([groupId, studentId])
+}
+
+enum DayOfWeek {
+  SUNDAY
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+}
+
+// Recurring weekly pattern a Group meets on — Sessions are generated from this.
+model ScheduleSlot {
+  id          String    @id @default(cuid())
+  groupId     String
+  group       Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  dayOfWeek   DayOfWeek
+  startTime   String    // "17:00" (24h)
+  endTime     String    // "18:30"
+  classroomId String?
+  classroom   Classroom? @relation(fields: [classroomId], references: [id])
+
+  @@index([groupId])
+}
+
+enum SessionStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
+// A concrete occurrence of a group meeting on a specific date
+model Session {
+  id          String        @id @default(cuid())
+  groupId     String
+  group       Group         @relation(fields: [groupId], references: [id])
+  scheduleSlotId String?
+  date        DateTime      // date only (time-of-day held separately)
+  startTime   String
+  endTime     String
+  status      SessionStatus @default(SCHEDULED)
+  createdAt   DateTime      @default(now())
+
+  expectedAttendances ExpectedAttendance[]
+  attendances         Attendance[]
+  charges             StudentCharge[]
+
+  @@unique([groupId, date, startTime])
+  @@index([date])
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Attendance Engine
+// ──────────────────────────────────────────────────────────────────────────
+
+// Created automatically for every enrolled student when a Session is generated.
+// Drives the "student is only absent once expected" business rule.
+model ExpectedAttendance {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  studentId String
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  resolved  Boolean  @default(false) // true once an Attendance record has been finalized
+  createdAt DateTime @default(now())
+
+  @@unique([sessionId, studentId])
+  @@index([studentId])
+}
+
+enum AttendanceStatus {
+  PRESENT
+  LATE
+  ABSENT
+}
+
+enum AttendanceMethod {
+  QR
+  NFC
+  MANUAL
+}
+
+model Attendance {
+  id            String            @id @default(cuid())
+  sessionId     String
+  session       Session           @relation(fields: [sessionId], references: [id])
+  studentId     String
+  student       Student           @relation(fields: [studentId], references: [id])
+  status        AttendanceStatus
+  method        AttendanceMethod
+  checkInTime   DateTime?
+  recordedById  String?
+  recordedBy    User?             @relation("AttendanceRecordedBy", fields: [recordedById], references: [id])
+  createdAt     DateTime          @default(now())
+
+  logs AttendanceLog[]
+
+  @@unique([sessionId, studentId])
+  @@index([studentId])
+}
+
+model AttendanceLog {
+  id           String   @id @default(cuid())
+  attendanceId String
+  attendance   Attendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  fromStatus   AttendanceStatus?
+  toStatus     AttendanceStatus
+  changedById  String?
+  createdAt    DateTime @default(now())
+}
+
+enum NfcCardStatus {
+  ACTIVE
+  LOST
+  DEACTIVATED
+}
+
+model NfcCard {
+  id           String        @id @default(cuid())
+  studentId    String
+  student      Student       @relation(fields: [studentId], references: [id])
+  cardUid      String        @unique
+  status       NfcCardStatus @default(ACTIVE)
+  assignedDate DateTime      @default(now())
+  lastUsedAt   DateTime?
+  device       String?
+
+  @@index([studentId])
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Exams
+// ──────────────────────────────────────────────────────────────────────────
+
+enum ExamType {
+  ONLINE
+  OFFLINE
+}
+
+model Exam {
+  id             String   @id @default(cuid())
+  centerId       String
+  subjectId      String
+  subject        Subject  @relation(fields: [subjectId], references: [id])
+  groupId        String
+  group          Group    @relation(fields: [groupId], references: [id])
+  teacherId      String
+  teacher        Teacher  @relation(fields: [teacherId], references: [id])
+  name           String
+  date           DateTime
+  durationMinutes Int
+  totalMarks     Decimal  @default(0) @db.Decimal(10, 2)
+  examType       ExamType
+  createdById    String
+  createdBy      User     @relation("ExamCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+
+  questions   Question[]
+  attempts    ExamAttempt[]
+  results     ExamResult[]
+
+  @@index([groupId])
+}
+
+enum QuestionType {
+  MULTIPLE_CHOICE
+  TRUE_FALSE
+  SHORT_ANSWER
+  ESSAY
+}
+
+model Question {
+  id     String       @id @default(cuid())
+  examId String
+  exam   Exam         @relation(fields: [examId], references: [id], onDelete: Cascade)
+  type   QuestionType
+  text   String
+  marks  Decimal      @default(1) @db.Decimal(10, 2)
+  order  Int          @default(0)
+
+  options QuestionOption[]
+  answers Answer[]
+}
+
+model QuestionOption {
+  id         String   @id @default(cuid())
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  text       String
+  isCorrect  Boolean  @default(false)
+
+  answers Answer[]
+}
+
+enum ExamAttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+}
+
+model ExamAttempt {
+  id          String            @id @default(cuid())
+  examId      String
+  exam        Exam              @relation(fields: [examId], references: [id])
+  studentId   String
+  student     Student           @relation(fields: [studentId], references: [id])
+  status      ExamAttemptStatus @default(IN_PROGRESS)
+  startedAt   DateTime          @default(now())
+  submittedAt DateTime?
+
+  answers Answer[]
+
+  @@unique([examId, studentId])
+}
+
+model Answer {
+  id              String          @id @default(cuid())
+  attemptId       String
+  attempt         ExamAttempt     @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  questionId      String
+  question        Question        @relation(fields: [questionId], references: [id])
+  selectedOptionId String?
+  selectedOption  QuestionOption? @relation(fields: [selectedOptionId], references: [id])
+  answerText      String?
+  isCorrect       Boolean?
+  marksAwarded    Decimal?        @db.Decimal(10, 2)
+
+  @@unique([attemptId, questionId])
+}
+
+enum ExamResultSource {
+  ONLINE_AUTO
+  OFFLINE_MANUAL
+}
+
+model ExamResult {
+  id           String            @id @default(cuid())
+  examId       String
+  exam         Exam              @relation(fields: [examId], references: [id])
+  studentId    String
+  student      Student           @relation(fields: [studentId], references: [id])
+  score        Decimal           @db.Decimal(10, 2)
+  totalMarks   Decimal           @db.Decimal(10, 2)
+  source       ExamResultSource
+  gradedById   String?
+  gradedBy     User?             @relation("ExamResultGradedBy", fields: [gradedById], references: [id])
+  createdAt    DateTime          @default(now())
+
+  @@unique([examId, studentId])
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Finance
+// ──────────────────────────────────────────────────────────────────────────
+
+model Subscription {
+  id           String       @id @default(cuid())
+  studentId    String
+  student      Student      @relation(fields: [studentId], references: [id])
+  groupId      String?
+  group        Group?       @relation(fields: [groupId], references: [id])
+  billingModel BillingModel
+  amount       Decimal      @db.Decimal(10, 2)
+  startDate    DateTime     @default(now())
+  endDate      DateTime?
+  active       Boolean      @default(true)
+
+  @@index([studentId])
+}
+
+// A ledger entry for an amount owed by a student (monthly charge, per-session charge, custom fee)
+model StudentCharge {
+  id          String   @id @default(cuid())
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id])
+  groupId     String?
+  group       Group?   @relation(fields: [groupId], references: [id])
+  sessionId   String?
+  session     Session? @relation(fields: [sessionId], references: [id])
+  amount      Decimal  @db.Decimal(10, 2)
+  reason      String   // e.g. "اشتراك شهري - أغسطس", "حصة بتاريخ ..."
+  // For MONTHLY charges only — "2026-08" — prevents double-charging the same
+  // group/month when a student is added to a group more than once.
+  period      String?
+  createdAt   DateTime @default(now())
+
+  @@unique([studentId, groupId, period])
+  @@index([studentId])
+}
+
+model Payment {
+  id           String   @id @default(cuid())
+  studentId    String
+  student      Student  @relation(fields: [studentId], references: [id])
+  amount       Decimal  @db.Decimal(10, 2)
+  method       String   @default("CASH")
+  note         String?
+  receivedById String
+  receivedBy   User     @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@index([studentId])
+}
+
+model Expense {
+  id          String   @id @default(cuid())
+  centerId    String
+  center      Center   @relation(fields: [centerId], references: [id])
+  category    String
+  amount      Decimal  @db.Decimal(10, 2)
+  description String?
+  date        DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@index([centerId])
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Notifications / WhatsApp
+// ──────────────────────────────────────────────────────────────────────────
+
+enum NotificationChannel {
+  IN_APP
+  WHATSAPP
+}
+
+model Notification {
+  id        String              @id @default(cuid())
+  userId    String
+  user      User                @relation(fields: [userId], references: [id])
+  title     String
+  body      String
+  channel   NotificationChannel @default(IN_APP)
+  isRead    Boolean             @default(false)
+  meta      Json?
+  createdAt DateTime            @default(now())
+
+  @@index([userId])
+}
+
+enum WhatsAppStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+model WhatsAppMessage {
+  id               String         @id @default(cuid())
+  toPhone          String
+  templateKey      String
+  variables        Json
+  status           WhatsAppStatus @default(PENDING)
+  providerMessageId String?
+  error            String?
+  sentAt           DateTime?
+  createdAt        DateTime       @default(now())
+
+  @@index([toPhone])
+}
+
+model MessageTemplate {
+  id        String   @id @default(cuid())
+  centerId  String
+  center    Center   @relation(fields: [centerId], references: [id])
+  key       String   // attendance.present, attendance.absent, exam.reminder, ...
+  language  String   @default("ar")
+  content   String   // e.g. "تم تسجيل حضور {{student_name}} ..."
+
+  @@unique([centerId, key, language])
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Settings / Audit
+// ──────────────────────────────────────────────────────────────────────────
+
+model Setting {
+  id       String @id @default(cuid())
+  centerId String
+  center   Center @relation(fields: [centerId], references: [id])
+  key      String
+  value    Json
+
+  @@unique([centerId, key])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  centerId  String
+  center    Center   @relation(fields: [centerId], references: [id])
+  userId    String?
+  user      User?    @relation("AuditActor", fields: [userId], references: [id])
+  action    String   // e.g. student.create, attendance.manual_override
+  entity    String   // e.g. Student
+  entityId  String?
+  meta      Json?
+  ip        String?
+  device    String?
+  createdAt DateTime @default(now())
+
+  @@index([centerId])
+  @@index([entity, entityId])
+}

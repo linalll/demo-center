@@ -1,0 +1,65 @@
+export type Dictionary = {
+  app: { name: string; nameEn: string };
+  common: {
+    save: string;
+    cancel: string;
+    delete: string;
+    edit: string;
+    add: string;
+    search: string;
+    loading: string;
+    noData: string;
+    retry: string;
+    confirm: string;
+    back: string;
+    next: string;
+    status: string;
+    active: string;
+    inactive: string;
+  };
+  nav: {
+    dashboard: string;
+    students: string;
+    allStudents: string;
+    addStudent: string;
+    attendance: string;
+    prepareSession: string;
+    attendanceLog: string;
+    absence: string;
+    lateness: string;
+    qrAttendance: string;
+    nfcCards: string;
+    groups: string;
+    sessions: string;
+    schedule: string;
+    teachers: string;
+    subjects: string;
+    exams: string;
+    createExam: string;
+    results: string;
+    finance: string;
+    payments: string;
+    expenses: string;
+    debts: string;
+    reports: string;
+    notifications: string;
+    users: string;
+    settings: string;
+  };
+  auth: {
+    login: string;
+    register: string;
+    phone: string;
+    fullName: string;
+    sendCode: string;
+    verifyCode: string;
+    code: string;
+    logout: string;
+  };
+  landing: {
+    heroTitle: string;
+    heroSubtitle: string;
+    ctaPrimary: string;
+    ctaSecondary: string;
+  };
+};
